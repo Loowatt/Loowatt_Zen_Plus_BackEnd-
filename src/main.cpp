@@ -12,7 +12,7 @@
 #define INIT_EEPROM
 #define MAX_FILM 216000  //192000 -> 12m// 13.7m -> 212,800
 #define COUNT_CUTOFF 1920 //keep same
-#define SET_UID 0x1  //replace by 0x0001
+#define SET_UID 0x9999  //replace by 0x0001
 #define MAX_LOW_RPM_COUNT_JAMMED_FLUSH 10
 //ISRs
 signed long encoderCount = 0;
@@ -530,19 +530,26 @@ void update_ui_percent()
     int percentage_int = int(percentage);
 
     oled.clearBuffer();
-    oled.setCursor(18, 48);
+    oled.setCursor(36, 48);
   
 
     if (percentage_int < 100)
     {
       oled.print(' ');
+      oled.print(' ');
     }
     if (percentage_int < 10)
     {
       oled.print(' ');
+      oled.print(' ');
     }
 
-    oled.print(percentage, 1);
+    if (percentage_int >= 100)
+    {
+      percentage_int = 100;
+    }
+
+    oled.print(percentage_int);
 
     oled.updateDisplayArea(1, 3, 9, 4); //x,
   }
