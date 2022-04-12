@@ -27,6 +27,10 @@
 #define LT_BLOCK_ADDR  0x12         //R 2
 #define LT_SER_ADDR 0x13            //R 2
 
+#define ACTUAL_FILM_ADDR 0x14       //R-W-2
+#define PPR_MM_ADDR 0x15            //R-W-2
+#define JAM_RPM_ADDR 0x16           //R-W-2
+
 // EEPROM ADDRESSES
 #define EE_IS_INIT_ADDR 0x00
 #define EE_UID_0_ADDR 0x01
@@ -58,6 +62,15 @@
 
 #define EE_LT_SER_0_ADDR 0x1A
 #define EE_LT_SER_1_ADDR 0x1B
+
+#define EE_ACTUAL_FILM_0_ADDR 0x1C
+#define EE_ACTUAL_FILM_1_ADDR 0x1D
+
+#define EE_PPR_MM_0_ADDR 0x1E
+#define EE_PPR_MM_1_ADDR 0x1F
+
+#define EE_JAM_RPM_0_ADDR 0x20
+#define EE_JAM_RPM_1_ADDR 0x21
 
 
 union T_TwoBytesData

@@ -8,12 +8,12 @@
 #include "pins.h"
 #include "flushfilm.h"
 #include <TaskScheduler.h>
+#include "zen_config.h"
 
 #define INIT_EEPROM
-#define MAX_FILM 216000  //192000 -> 12m// 13.7m -> 212,800
-#define COUNT_CUTOFF 1920 //keep same
-#define SET_UID 0x9999  //replace by 0x0001
-#define MAX_LOW_RPM_COUNT_JAMMED_FLUSH 10
+
+float jamRpm = 0.0;
+
 //ISRs
 signed long encoderCount = 0;
 
@@ -41,6 +41,11 @@ T_TwoBytesData COUNT_MM_REG;
 T_TwoBytesData MAX_FLUSH_COUNT_REG;
 T_FourBytesData MAX_FILM_COUNT_REG;
 
+T_TwoBytesData ACTUAL_FILM_REG;
+T_TwoBytesData PPR_MM_REG;
+T_TwoBytesData JAM_RPM_REG;
+
+
 T_FourBytesData_Signed FILM_LEFT_REG;
 T_TwoBytesData MOTOR_STATE_REG;
 T_TwoBytesData TEMP_REG;
@@ -51,6 +56,10 @@ T_TwoBytesData EEUID;
 T_FourBytesData_Signed EEFilmLeft;
 T_FourBytesData EEMaxFilm;
 T_StatusByte EEStatus;
+
+T_TwoBytesData EEPprMM;
+T_TwoBytesData EEActualFilm;
+T_TwoBytesData EEJamRpm;
 
 // EEPROM LT REGISTERS
 T_FourBytesData LT_FLUSHES;
@@ -72,14 +81,14 @@ FlushFilm film(MAX_FILM);
 Task percentage_update_task(200, TASK_FOREVER, &update_ui_percent);
 Task motor_control_task(50, TASK_FOREVER, &motor_control);
 
-Task flush_stop_task(4000, TASK_FOREVER, &flush_stop);
+Task flush_stop_task(3000, TASK_FOREVER, &flush_stop);
 Task forced_motor_stop_task(10000, TASK_FOREVER, &forced_motor_stop);
 
-int LowRPMCountFoward = 0;
-int LowRPMCountBackward = 0;
+int LowRPMCountFoward = 5;
+int LowRPMCountBackward = 5;
 
-const double FORWARD_JAM_RPM_CUTOFF = -26.0;//-30.0;  //this is backward  
-const double BACKWARD_JAM_RPM_CUTOFF = 26.0;//33.0;  //this is forward  
+
+
 
 Scheduler runner;
 
@@ -170,6 +179,23 @@ void setup()
 
     EEPROM.write(EE_LT_SER_0_ADDR, 0);
     EEPROM.write(EE_LT_SER_1_ADDR, 0);
+
+    T_TwoBytesData W_JAM;
+    W_JAM.u_twobytes = JAM_RPM_CUTOFF;
+    EEPROM.write(EE_JAM_RPM_0_ADDR, W_JAM.s_twobytes.byte_0);
+    EEPROM.write(EE_JAM_RPM_1_ADDR, W_JAM.s_twobytes.byte_1);
+
+    T_TwoBytesData W_ACTUAL_FILM;
+    W_ACTUAL_FILM.u_twobytes = ACTUAL_FILM;
+    EEPROM.write(EE_ACTUAL_FILM_0_ADDR, W_ACTUAL_FILM.s_twobytes.byte_0);
+    EEPROM.write(EE_ACTUAL_FILM_1_ADDR, W_ACTUAL_FILM.s_twobytes.byte_1);
+
+    T_TwoBytesData W_PPR_MM;
+    W_PPR_MM.u_twobytes = PPRMM;
+    EEPROM.write(EE_PPR_MM_0_ADDR, W_PPR_MM.s_twobytes.byte_0);
+    EEPROM.write(EE_PPR_MM_1_ADDR, W_PPR_MM.s_twobytes.byte_1);
+
+
   }
 
   else
@@ -180,6 +206,10 @@ void setup()
   delay(100);
 
   EEIsInit = EEPROM.read(EE_IS_INIT_ADDR);
+
+  delay(100);
+
+  EEStatus.u_status = EEPROM.read(EE_STATUS_ADDR);
 
   EEUID.s_twobytes.byte_0 = EEPROM.read(EE_UID_0_ADDR);
   EEUID.s_twobytes.byte_1 = EEPROM.read(EE_UID_1_ADDR);
@@ -194,7 +224,14 @@ void setup()
   EEMaxFilm.s_fourbytes.byte_2 = EEPROM.read(EE_MAX_FILM_2_ADDR);
   EEMaxFilm.s_fourbytes.byte_3 = EEPROM.read(EE_MAX_FILM_3_ADDR);
 
-  EEStatus.u_status = EEPROM.read(EE_STATUS_ADDR);
+  EEActualFilm.s_twobytes.byte_0 = EEPROM.read(EE_ACTUAL_FILM_0_ADDR);
+  EEActualFilm.s_twobytes.byte_1 = EEPROM.read(EE_ACTUAL_FILM_1_ADDR);
+
+  EEPprMM.s_twobytes.byte_0 = EEPROM.read(EE_PPR_MM_0_ADDR);
+  EEPprMM.s_twobytes.byte_1 = EEPROM.read(EE_PPR_MM_1_ADDR);
+
+  EEJamRpm.s_twobytes.byte_0 = EEPROM.read(EE_JAM_RPM_0_ADDR);
+  EEJamRpm.s_twobytes.byte_1 = EEPROM.read(EE_JAM_RPM_1_ADDR);
 
   LT_FLUSHES.s_fourbytes.byte_0 = EEPROM.read(EE_LT_FLUSHES_0_ADDR);
   LT_FLUSHES.s_fourbytes.byte_1 = EEPROM.read(EE_LT_FLUSHES_1_ADDR);
@@ -213,13 +250,36 @@ void setup()
 
   Serial.println(LT_SERVICES.u_twobytes, HEX);
 
+
   if (EEIsInit == 0xAA)
   {
     STATUS_REG.u_status = EEStatus.u_status;
 
+    Serial.print("Status = ");
+    Serial.println(STATUS_REG.u_status);
+
+    //add ble read data here
+
     UID_REG.u_twobytes = EEUID.u_twobytes;
     FILM_LEFT_REG.u_fourbytes = EEFilmLeft.u_fourbytes;
+    ACTUAL_FILM_REG.u_twobytes = EEActualFilm.u_twobytes;
+    PPR_MM_REG.u_twobytes = EEPprMM.u_twobytes;
+    JAM_RPM_REG.u_twobytes = EEJamRpm.u_twobytes;
+    jamRpm = JAM_RPM_REG.u_twobytes;
+
+    Serial.print("Actual Film = ");
+    Serial.println(ACTUAL_FILM_REG.u_twobytes, DEC);
+
+    Serial.print("PPR per MM = ");
+    Serial.println(PPR_MM_REG.u_twobytes, DEC);
+
+    Serial.print("Jam RPM = ");
+    Serial.println(jamRpm);
+    
+    Serial.print("Film Left = ");
     Serial.println(FILM_LEFT_REG.u_fourbytes, DEC);
+
+    Serial.print("Unit ID = ");
     Serial.println(UID_REG.u_twobytes, HEX);
 
     oled.setCursor(36, 12);
@@ -247,7 +307,7 @@ void setup()
 
   oled.clearBuffer();
   oled.setFont(u8g2_font_helvB18_tr); // set the target font for the text width calculation
-
+  
   film.init(FILM_LEFT_REG.u_fourbytes, 0x12345678);
 
   if (STATUS_REG.s_status.state == S_Run)
@@ -402,7 +462,7 @@ void receiveEvent(int bytesReceived)
     case STATUS_ADDR:
       if (bytesReceived == sizeof(STATUS_REG.u_status))
       {
-        T_StatusByte status_only;
+        T_StatusByte status_only; 
         status_only.u_status = Wire.read();
         STATUS_REG.s_status.state = status_only.s_status.state; // only state is writable flags are read-only
 
@@ -415,7 +475,7 @@ void receiveEvent(int bytesReceived)
         {
           digitalWrite(STATUS_LED, LOW);
         }
-
+        
         EEPROM.write(EE_STATUS_ADDR, STATUS_REG.u_status);
       }
       else
@@ -502,6 +562,62 @@ void receiveEvent(int bytesReceived)
 
       break;
 
+    case ACTUAL_FILM_ADDR:
+      Serial.println(bytesReceived);
+      if (bytesReceived == sizeof(ACTUAL_FILM_REG.u_twobytes))
+      {
+        ACTUAL_FILM_REG.s_twobytes.byte_0 = Wire.read();
+        ACTUAL_FILM_REG.s_twobytes.byte_1 = Wire.read();
+
+        EEPROM.write(EE_ACTUAL_FILM_0_ADDR, ACTUAL_FILM_REG.s_twobytes.byte_0);
+        EEPROM.write(EE_ACTUAL_FILM_1_ADDR, ACTUAL_FILM_REG.s_twobytes.byte_1);
+      }
+      else
+      {
+        dump(bytesReceived);
+      }
+
+      break;  
+
+    case PPR_MM_ADDR:
+      Serial.println(bytesReceived);
+      if (bytesReceived == sizeof(ACTUAL_FILM_REG.u_twobytes))
+      {
+        PPR_MM_REG.s_twobytes.byte_0 = Wire.read();
+        PPR_MM_REG.s_twobytes.byte_1 = Wire.read();
+
+        EEPROM.write(EE_PPR_MM_0_ADDR, PPR_MM_REG.s_twobytes.byte_0);
+        EEPROM.write(EE_PPR_MM_1_ADDR, PPR_MM_REG.s_twobytes.byte_1);
+
+        Serial.println(PPR_MM_REG.u_twobytes);
+      }
+      else
+      {
+        dump(bytesReceived);
+      }
+
+      break;  
+
+    case JAM_RPM_ADDR:
+      Serial.println(bytesReceived);
+      if(bytesReceived == sizeof(JAM_RPM_REG.u_twobytes))
+      {
+        JAM_RPM_REG.s_twobytes.byte_0 = Wire.read();
+        JAM_RPM_REG.s_twobytes.byte_1 = Wire.read();
+
+        EEPROM.write(EE_JAM_RPM_0_ADDR, JAM_RPM_REG.s_twobytes.byte_0);
+        EEPROM.write(EE_JAM_RPM_1_ADDR, JAM_RPM_REG.s_twobytes.byte_1);
+
+        Serial.println(JAM_RPM_REG.u_twobytes);
+
+      }
+      else
+      {
+        dump(bytesReceived);
+      }
+
+      break;
+      
     default:
       dump(bytesReceived);
       break;
@@ -524,23 +640,20 @@ void update_ui_percent()
   previous_film_left = FILM_LEFT_REG.u_fourbytes;
   if (OnChange)
   {
-    float mm_film_count = FILM_LEFT_REG.u_fourbytes / 13.5; // arduino can't handle big division it seems
-    float percentage = (mm_film_count / 16000.0) * 100.0;
+    float mm_film_count = FILM_LEFT_REG.u_fourbytes / EEPprMM.u_twobytes; // arduino can't handle big division it seems
+    float percentage = (mm_film_count / EEActualFilm.u_twobytes) * 100.0;
 
     int percentage_int = int(percentage);
 
     oled.clearBuffer();
-    oled.setCursor(36, 48);
-  
+    oled.setCursor(32, 48);
 
     if (percentage_int < 100)
     {
       oled.print(' ');
-      oled.print(' ');
     }
     if (percentage_int < 10)
     {
-      oled.print(' ');
       oled.print(' ');
     }
 
@@ -551,7 +664,7 @@ void update_ui_percent()
 
     oled.print(percentage_int);
 
-    oled.updateDisplayArea(1, 3, 9, 4); //x,
+    oled.updateDisplayArea(1, 3, 9, 4);
   }
 }
 
@@ -564,12 +677,15 @@ void motor_control()
 
   case MSTOP:
 
-    if (MStateChanged)
+    if(MStateChanged)
     {
+      Serial.print("Film Left = ");
+      Serial.println(FILM_LEFT_REG.u_fourbytes, DEC);
+
       flushmotor.stop();
       flushmotor.RPM = 0.0;
 
-      if (flush_stop_task.isEnabled())
+      if(flush_stop_task.isEnabled())
       {
         flush_stop_task.disable();
 
@@ -580,7 +696,7 @@ void motor_control()
         EEPROM.write(EE_LT_FLUSHES_3_ADDR, LT_FLUSHES.s_fourbytes.byte_3);
       }
 
-      if (forced_motor_stop_task.isEnabled())
+      if(forced_motor_stop_task.isEnabled())
       {
         forced_motor_stop_task.disable();
       }
@@ -593,12 +709,12 @@ void motor_control()
     break;
 
   case MBACKWARD:
-
-    if (MStateChanged)
+    
+    if(MStateChanged)
     {
       flushmotor.backward();
 
-      if (MOTORCTRL_REG.s_motorcontrol.flush)
+      if(MOTORCTRL_REG.s_motorcontrol.flush)
       {
         flush_stop_task.enableDelayed();
       }
@@ -613,11 +729,11 @@ void motor_control()
 
   case MFORWARD:
 
-    if (MStateChanged)
+    if(MStateChanged)
     {
       flushmotor.forward();
 
-      if (MOTORCTRL_REG.s_motorcontrol.flush)
+      if(MOTORCTRL_REG.s_motorcontrol.flush)
       {
         flush_stop_task.enableDelayed();
       }
@@ -633,7 +749,7 @@ void motor_control()
     break;
   }
 
-  if (MOTORCTRL_REG.s_motorcontrol.m_state == MFORWARD || MOTORCTRL_REG.s_motorcontrol.m_state == MBACKWARD)
+  if(MOTORCTRL_REG.s_motorcontrol.m_state == MFORWARD || MOTORCTRL_REG.s_motorcontrol.m_state == MBACKWARD)
   {
     if (flushmotor.pwm_value < 240)
     {
@@ -643,7 +759,7 @@ void motor_control()
     signed long count = encoderCount;
     encoderCount = 0;
     film.updateFilmLeft(count);
-    if (count > 0)
+    if(count > 0)
     {
       LT_FILM_USED.u_fourbytes = LT_FILM_USED.u_fourbytes + count;
 
@@ -663,14 +779,14 @@ void motor_control()
     long time_elapsed = millis() - last_checked_millis;
     double temporalmultiplier = 60.0 / (time_elapsed / 1000.0);
     last_checked_millis = millis();
-    double rpm = ((count / 16.0) * temporalmultiplier) / 149.25;
-    flushmotor.RPM = rpm;
+    double rpm = ((count / encoderPPR) * temporalmultiplier) / gearBoxRatio;
+    flushmotor.RPM = abs(rpm);
 
     Serial.println(flushmotor.RPM, DEC);
 
     if (MOTORCTRL_REG.s_motorcontrol.m_state == MFORWARD)
     {
-      if (flushmotor.pwm_value > 240 && flushmotor.RPM > FORWARD_JAM_RPM_CUTOFF) // value needs to be calibrated with current draw most probably
+      if (flushmotor.pwm_value > 240 && flushmotor.RPM < jamRpm) // value needs to be calibrated with current draw most probably
       {
         LowRPMCountFoward = LowRPMCountFoward + 1;
         Serial.print("FCount : ");
@@ -678,17 +794,13 @@ void motor_control()
       }
       else
       {
-        if (MOTORCTRL_REG.s_motorcontrol.m_state == MSTOP)
-        {
-          LowRPMCountFoward = 0;
-        }
-        
+        LowRPMCountFoward = 0;
       }
     }
 
     if (MOTORCTRL_REG.s_motorcontrol.m_state == MBACKWARD)
     {
-      if (flushmotor.pwm_value > 240 && flushmotor.RPM < BACKWARD_JAM_RPM_CUTOFF) // value needs to be calibrated with current draw most probably
+      if (flushmotor.pwm_value > 240 && flushmotor.RPM < jamRpm) // value needs to be calibrated with current draw most probably
       {
         LowRPMCountBackward = LowRPMCountBackward + 1;
         Serial.print("BCount :");
@@ -696,21 +808,19 @@ void motor_control()
       }
       else
       {
-        if (MOTORCTRL_REG.s_motorcontrol.m_state == MSTOP)
-        {
-          LowRPMCountFoward = 0;
-        }
+        LowRPMCountBackward = 0;
       }
     }
 
     //int currentdraw = flushmotor.getCurrent();
 
-    if (LowRPMCountFoward > MAX_LOW_RPM_COUNT_JAMMED_FLUSH || LowRPMCountBackward > MAX_LOW_RPM_COUNT_JAMMED_FLUSH)
+    if(LowRPMCountFoward > MAX_LOW_RPM_COUNT_JAMMED_FLUSH || LowRPMCountBackward > MAX_LOW_RPM_COUNT_JAMMED_FLUSH)
     {
       STATUS_REG.s_status.jam = NOK;
       MOTORCTRL_REG.s_motorcontrol.m_state = MSTOP;
       LT_BLOCKAGES.u_twobytes = LT_BLOCKAGES.u_twobytes + 1;
 
+      
       EEPROM.write(EE_LT_BLOCK_0_ADDR, LT_BLOCKAGES.s_twobytes.byte_0);
       EEPROM.write(EE_LT_BLOCK_1_ADDR, LT_BLOCKAGES.s_twobytes.byte_1);
 
@@ -718,12 +828,13 @@ void motor_control()
       LowRPMCountBackward = 0;
     }
     // need to check both current and RPM to check whether jamming has occurred
+
   }
 }
 
 void flush_stop()
 {
-  if (flushmotor.MState != MSTOP)
+  if(flushmotor.MState != MSTOP)
   {
     MOTORCTRL_REG.s_motorcontrol.m_state = MSTOP;
   }
@@ -731,7 +842,7 @@ void flush_stop()
 
 void forced_motor_stop()
 {
-  if (flushmotor.MState != MSTOP)
+  if(flushmotor.MState != MSTOP)
   {
     MOTORCTRL_REG.s_motorcontrol.m_state = MSTOP;
   }
